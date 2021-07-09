@@ -1,118 +1,110 @@
-#!/usr/bin/python
-from __future__ import absolute_import, print_function
+#!/usr/bin/env python3
+
+# since this is probably used on a system with munki the munki-included python should be used:
+# #!/usr/local/munki/munki-python
+# coding: utf8
+
+'''
+This module uses the printer p_gen.py module to generate a munki-nopkg-printer setup from variables
+and writes it to disk.
+'''
+__author__ = 'Johannes Bock (bock@wycomco.de)'
+__version__ = '2.0.2_rc'
+
 
 import argparse
 import csv
 import os
-import re
 import sys
+from xml.parsers.expat import ExpatError
 
+from plistlib import load as load_plist
+from plistlib import dump as dump_plist
+
+import pgen
+
+# Preference hanlding copied from Munki:
+# https://github.com/munki/munki/blob/e8ccc5f53e8f69b59fbc153a783158a34ca6d1ea/code/client/munkilib/cliutils.py#L55
+
+BUNDLE_ID = 'com.googlecode.munki.munkiimport'
+PREFSNAME = BUNDLE_ID + '.plist'
+PREFSPATH = os.path.expanduser(os.path.join('~/Library/Preferences', PREFSNAME))
+
+FOUNDATION_SUPPORT = True
 try:
-    from plistlib import load as load_plist  # Python 3
-    from plistlib import dump as dump_plist
+    # PyLint cannot properly find names inside Cocoa libraries, so issues bogus
+    # No name 'Foo' in module 'Bar' warnings. Disable them.
+    # pylint: disable=E0611
+    from Foundation import CFPreferencesCopyAppValue
+    # pylint: enable=E0611
 except ImportError:
-    from plistlib import readPlist as load_plist  # Python 2
-    from plistlib import writePlist as dump_plist
+    # CoreFoundation/Foundation isn't available
+    FOUNDATION_SUPPORT = False
 
+if FOUNDATION_SUPPORT:
+    def pref(prefname, default=None):
+        """Return a preference. Since this uses CFPreferencesCopyAppValue,
+        Preferences can be defined several places. Precedence is:
+            - MCX/Configuration Profile
+            - ~/Library/Preferences/ByHost/
+                com.googlecode.munki.munkiimport.XX.plist
+            - ~/Library/Preferences/com.googlecode.munki.munkiimport.plist
+            - /Library/Preferences/com.googlecode.munki.munkiimport.plist
+        """
+        value = CFPreferencesCopyAppValue(prefname, BUNDLE_ID)
+        if value is None:
+            return default
+        
+        return value
 
-def getOptionsString(optionList):
-    # optionList should be a list item
-    optionsString = ''
-    for option in optionList:
-        if option == optionList[-1]:
-            optionsString += "\"%s\":\"%s\"" % (str(option.split('=')[0]), str(option.split('=')[1]))
-        else:
-            optionsString += "\"%s\":\"%s\"" % (str(option.split('=')[0]), str(option.split('=')[1])) + ', '
-    return optionsString
-
-parser = argparse.ArgumentParser(description='Generate a Munki nopkg-style pkginfo for printer installation.')
-parser.add_argument('--printername', help='Name of printer queue. May not contain spaces, tabs, # or /. Required.')
-parser.add_argument('--driver', help='Name of driver file in /Library/Printers/PPDs/Contents/Resources/. Can be relative or full path. Required.')
-parser.add_argument('--address', help='IP or DNS address of printer. If no protocol is specified, defaults to lpd://. Required.')
-parser.add_argument('--location', help='Location name for printer. Optional. Defaults to printername.')
-parser.add_argument('--displayname', help='Display name for printer (and Munki pkginfo). Optional. Defaults to printername.')
-parser.add_argument('--desc', help='Description for Munki pkginfo only. Optional.')
-parser.add_argument('--requires', help='Required packages in form of space-delimited \'CanonDriver1 CanonDriver2\'. Optional.')
-parser.add_argument('--options', nargs='*', dest='options', help='Printer options in form of space-delimited \'Option1=Key Option2=Key Option3=Key\', etc. Optional.')
-parser.add_argument('--version', help='Version number of Munki pkginfo. Optional. Defaults to 1.0.', default='1.0')
-parser.add_argument('--icon', help='Specifies an existing icon in the Munki repo to display for the printer in Managed Software Center. Optional.')
-parser.add_argument('--csv', help='Path to CSV file containing printer info. If CSV is provided, all other options are ignored.')
-args = parser.parse_args()
-
-
-pwd = os.path.dirname(os.path.realpath(__file__))
-f = open(os.path.join(pwd, 'AddPrinter-Template.plist'), 'rb')
-templatePlist = load_plist(f)
-f.close()
-
-if args.csv:
-    # A CSV was found, use that for all data.
-    with open(args.csv, mode='r') as infile:
-        reader = csv.reader(infile)
-        next(reader, None) # skip the header row
-        for row in reader:
-            newPlist = dict(templatePlist)
-            # each row contains 10 elements:
-            # Printer name, location, display name, address, driver, description, options, version, requires, icon
-            # options in the form of "Option=Value Option2=Value Option3=Value"
-            # requires in the form of "package1 package2" Note: the space seperator
-            theOptionString = ''
-            if row[6] != "":
-                theOptionString = getOptionsString(row[6].split(" "))
-            # First, change the plist keys in the pkginfo itself
-            newPlist['display_name'] = row[2]
-            newPlist['description'] = row[5]
-            newPlist['name'] = "AddPrinter_" + str(row[0]) # set to printer name
-            # Check for an icon
-            if row[9] != "":
-                newPlist['icon_name'] = row[9]
-            # Check for a version number
-            if row[7] != "":
-                # Assume the user specified a version number
-                version = row[7]
-            else:
-                # Use the default version of 1.0
-                version = "1.0"
-            newPlist['version'] = version
-            # Check for a protocol listed in the address
-            if '://' in row[3]:
-                # Assume the user passed in a full address and protocol
-                address = row[3]
-            else:
-                # Assume the user wants to use the default, lpd://
-                address = 'lpd://' + row[3]
-            # Append the driver path to the driver file specified in the csv
-            driver = '/Library/Printers/PPDs/Contents/Resources/%s' % row[4]
-            base_driver = row[4]
-            if row[4].endswith('.gz'):
-                base_driver = row[4].replace('.gz', '')
-            if base_driver.endswith('.ppd'):
-                base_driver = base_driver.replace('.ppd', '')
-            # Now change the variables in the installcheck_script
-            newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("PRINTERNAME", row[0])
-            newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("OPTIONS", theOptionString)
-            newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("LOCATION", row[1].replace('"', ''))
-            newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("DISPLAY_NAME", row[2].replace('"', ''))
-            newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("ADDRESS", address)
-            newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("DRIVER", base_driver)
-            # Now change the variables in the postinstall_script
-            newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("PRINTERNAME", row[0])
-            newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("LOCATION", row[1].replace('"', ''))
-            newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("DISPLAY_NAME", row[2].replace('"', ''))
-            newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("ADDRESS", address)
-            newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("DRIVER", driver)
-            newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("OPTIONS", theOptionString)
-            # Now change the one variable in the uninstall_script
-            newPlist['uninstall_script'] = newPlist['uninstall_script'].replace("PRINTERNAME", row[0])
-            # Add required packages if passed in the csv
-            if row[8] != "":
-                newPlist['requires'] = row[8].split(' ')
-            # Write out the file
-            newFileName = "AddPrinter-" + row[0] + "-" + version + ".pkginfo"
-            f = open(newFileName, 'wb')
-            dump_plist(newPlist, f)
-            f.close()
 else:
+    def pref(prefname, default=None):
+        """Returns a preference for prefname. This is a fallback mechanism if
+        CoreFoundation functions are not available -- for example to allow the
+        possible use of makecatalogs or manifestutil on Linux"""
+        if not hasattr(pref, 'cache'):
+            pref.cache = None
+        if not pref.cache:
+            try:
+                pwd = os.path.dirname(os.path.realpath(__file__)) #FIXME questionable!
+                f = open(os.path.join(pwd, PREFSPATH), 'rb')
+                pref.cache = load_plist(f)
+                f.close()
+            except (IOError, OSError, ExpatError):
+                pref.cache = {}
+        if prefname in pref.cache:
+            return pref.cache[prefname]
+        # no pref found
+        return default
+
+def parse_arguments():
+    '''
+    Process arguments.
+    '''
+    parser = argparse.ArgumentParser(description='Generate a Munki nopkg-style pkginfo for printer installation.')
+    parser.add_argument('--printername', help='Name of printer queue. May not contain spaces, tabs, # or /. Required.')
+    parser.add_argument('--driver', help='Name of driver file in /Library/Printers/PPDs/Contents/Resources/. Can be relative or full path. Required.')
+    parser.add_argument('--address', help='IP or DNS address of printer. If no protocol is specified, defaults to lpd://. Required.')
+    parser.add_argument('--location', help='Location name for printer. Optional. Defaults to printername.')
+    parser.add_argument('--displayname', help='Display name for printer (and Munki pkginfo). Optional. Defaults to printername.')
+    parser.add_argument('--desc', help='Description for Munki pkginfo only. Optional.')
+    parser.add_argument('--requires', help='Required packages in form of space-delimited \'CanonDriver1 CanonDriver2\'. Optional.')
+    parser.add_argument('--options', nargs='*', dest='options', help='Printer options in form of space-delimited \'Option1=Key Option2=Key Option3=Key\', etc. Optional.')
+    parser.add_argument('--version', help='Version number of Munki pkginfo. Optional. Defaults to 1.0.', default='1.0')
+    parser.add_argument('--icon', help='Specifies an existing icon in the Munki repo to display for the printer in Managed Software Center. Optional.')
+
+    parser.add_argument('--catalog', help='Specifies the catalog which shall be used. Defaults to default_catalog if present or testing otherweise. Optional.')
+    parser.add_argument('--munkiname', help='Name of Munki item. Defaults to printername. Optional.')
+    parser.add_argument('--repo', help='Path to Munki repo. If specified, we will try to write directly to its containing pkgsinfo directory. If not defined, we will write to current working directory. Optional.')
+    parser.add_argument('--subdirectory', help='Subdirectory of Munki\'s pkgsinfo directory. Optional.')
+    parser.add_argument('--pkginfoext', help='File extension for the nopkg. Defaults to pkginfo. Optional.', default='pkginfo')
+
+    parser.add_argument('--csv', help='Path to CSV file containing printer info. If CSV is provided, all other options are ignored.')
+    args = parser.parse_args()
+    
+    if args.csv:
+        return args
+    # check for missing parameters and quit if not present
     if not args.printername:
         print(os.path.basename(sys.argv[0]) + ': error: argument --printername is required', file=sys.stderr)
         parser.print_usage()
@@ -125,90 +117,137 @@ else:
         print(os.path.basename(sys.argv[0]) + ': error: argument --address is required', file=sys.stderr)
         parser.print_usage()
         sys.exit(1)
+    return args
 
-    if re.search(r"[\s#/]", args.printername):
-        # printernames can't contain spaces, tabs, # or /.  See lpadmin manpage for details.
-        print("ERROR: Printernames can't contain spaces, tabs, # or /.", file=sys.stderr)
-        sys.exit(1)
+def create_path_safe(mydir):
+    '''Create all directories leading to the file stated.'''
+    # mydir = os.path.split(myfile)[0]
+    try:
+        os.makedirs(mydir)
+    except OSError as exception:
+        if exception.errno != errno.EEXIST:
+            logging.error('Directory %s could not be created!', mydir)
+            return False
+    return True
 
-    if args.desc:
-        description = args.desc
-    else:
-        description = ""
+def write_pkginfo(full_file_name, new_printer):
+    target_dir = os.path.split(full_file_name)[0]
+    target_exists = False
+    if not os.path.isdir(target_dir):
+        target_exists = create_path_safe(target_dir)
+    if target_exists:
+        #FIXME add error handling
+        file_handle = open(full_file_name, 'wb')
+        dump_plist(new_printer, file_handle)
+        file_handle.close()
 
-    if args.displayname:
-        displayName = args.displayname
-    else:
-        displayName = str(args.printername)
+def translate_row(printer_row):
+    translation = {
+        'printername':  'printer name',
+        'location':     'location',
+        'display_name': 'display name',
+        'address':      'address',
+        'driver':       'driver',
+        'description':  'description',
+        'options':      'options',
+        'version':      'version',
+        'requires':     'requires',
+        'icon_name':    'icon',
+        'catalogs':      'catalogs',
+        'subdirectory': 'subdirectory',
+        'munkiname':    'munki name'
+    }
+    new_row = dict()
+    for key, value in printer_row.items():
+        new_row[key.lower()] = value
 
-    if args.location:
-        location = args.location
-    else:
-        location = args.printername
+    printer_variables = pgen.get_printer_variables()
+    for key in translation:
+        print(translation[key])
+        print(new_row.get(translation[key]))
+        print()
+        printer_variables[key] = new_row.get(translation[key], printer_variables[key])
 
-    if args.version:
-        version = str(args.version)
-    else:
-        version = "1.0"
+    return printer_variables
 
-    if args.requires:
-        requires = args.requires
-    else:
-        requires = ""
 
-    if args.icon:
-        icon = args.icon
-    else:
-        icon = ""
+def csv_run(args, target_dir, file_ext):
+    # A CSV was found, use that for all data.
 
+    with open(args.csv, mode='r') as infile:
+        file_sample = infile.read(128)
+        infile.seek(0) # back to the beginning
+        num_comma = file_sample.count(',')
+        num_semicolon = file_sample.count(';')
+        if num_comma > num_semicolon:
+            reader = csv.DictReader(infile, delimiter=',')
+        else:
+            reader = csv.DictReader(infile, delimiter=';')
+
+        for row in reader:
+            # In earlier versions, each row contains up to 10 elements:
+            # Printer name, Location, Display name, Address, Driver, Description, Options, Version,
+            # Requires, Icon.
+            # To preserve backward compatibility, define all possible elements with default values and check for
+            # required values
+            
+            print(row)
+            printer_variables = translate_row(row)
+            if 'catalogs' not in row.keys():
+                row['Catalogs'] = pref('default_catalog', default='testing')
+
+            new_printer = pgen.generate_printer(printer_variables)
+
+            subdir = printer_variables.get('subdirectory', '')
+            file_path = os.path.join(target_dir, subdir)
+            file_name = new_printer['name'] + '-' + new_printer['version'] + '.' + file_ext
+            file_path = os.path.join(file_path, file_name)
+            write_pkginfo(file_path, new_printer)
+
+def single_run(args, target_dir, file_ext):
+    #FIXME whole function
+    parameters = dict()
+    parameters['printername'] = args.printername
+    parameters['description'] = args.desc if args.desc else ''
+    parameters['displayname'] = args.displayname if args.displayname else args.printername
+    parameters['location'] = args.location if args.location else args.printername
+    parameters['version'] = str(args.version) if args.version else '1.0'
+    parameters['requires'] = args.requires if args.requires else ''
+    parameters['icon'] = args.icon if args.icon else ''
     if args.options:
-        optionsString = str(args.options[0]).split(' ')
-        optionsString = getOptionsString(optionsString)
+        options_string = args.options
     else:
-        optionsString = ''
+        parameters['options'] = ''
+    parameters['driver'] = args.driver if args.driver.startswith('/Library') else os.path.join('/Library/Printers/PPDs/Contents/Resources', args.driver)
+    parameters['address'] = args.address if'://' in args.address else ('lpd://' + args.address)
 
-    if args.driver.startswith('/Library'):
-        # Assume the user passed in a full path rather than a relative filename
-        driver = args.driver
+    new_printer = pgen.generate_printer(parameters)
+
+    subdir = args.get('Subdirectory', '')
+    file_path = os.path.join(target_dir, subdir)
+    file_name = new_printer['name'] + '-' + new_printer['version'] + file_ext
+    file_path = os.path.join(file_path, file_name)
+    write_pkginfo(file_path, new_printer)
+
+def main():
+    args = parse_arguments()
+
+    target_dir = os.getcwd() # get working directory
+    if args.repo:
+        tmp_dir = os.path.join(args.repo, 'pkgsinfo')
+        if os.path.isdir(tmp_dir):
+            target_dir = args.repo        
+
+    if args.pkginfoext:
+        file_ext = args.pkginfoext
     else:
-        # Assume only a relative filename
-        driver = os.path.join('/Library/Printers/PPDs/Contents/Resources', args.driver)
+        file_ext = 'pkginfo'
 
-    if '://' in args.address:
-        # Assume the user passed in a full address and protocol
-        address = args.address
+    if args.csv:
+        csv_run(args, target_dir, file_ext)
     else:
-        # Assume the user wants to use the default, lpd://
-        address = 'lpd://' + args.address
+        single_run(args, target_dir, file_ext)
 
-    newPlist = dict(templatePlist)
-   # root pkginfo variable replacement
-    newPlist['description'] = description
-    newPlist['display_name'] = displayName
-    newPlist['name'] = "AddPrinter_" + displayName.replace(" ", "")
-    newPlist['version'] = version
-    newPlist['icon_name'] = icon
-    # installcheck_script variable replacement
-    newPlist['installcheck_script'] = templatePlist['installcheck_script'].replace("PRINTERNAME", args.printername)
-    newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("ADDRESS", address)
-    newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("DISPLAY_NAME", displayName)
-    newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("LOCATION", location.replace('"', ''))
-    newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("DRIVER", os.path.splitext(os.path.basename(driver))[0].replace('"', ''))
-    newPlist['installcheck_script'] = newPlist['installcheck_script'].replace("OPTIONS", optionsString)
-    # postinstall_script variable replacement
-    newPlist['postinstall_script'] = templatePlist['postinstall_script'].replace("PRINTERNAME", args.printername)
-    newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("ADDRESS", address)
-    newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("DISPLAY_NAME", displayName)
-    newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("LOCATION", location.replace('"', ''))
-    newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("DRIVER", driver.replace('"', ''))
-    newPlist['postinstall_script'] = newPlist['postinstall_script'].replace("OPTIONS", optionsString)
-    # uninstall_script variable replacement
-    newPlist['uninstall_script'] = templatePlist['uninstall_script'].replace("PRINTERNAME", args.printername)
-    # required packages
-    if requires != "":
-        newPlist['requires'] = [r.replace('\\', '') for r in re.split(r"(?<!\\)\s", requires)]
-
-    newFileName = "AddPrinter-" + str(args.printername) + "-%s.pkginfo" % str(version)
-    f = open(newFileName, 'wb')
-    dump_plist(newPlist, f)
-    f.close()
+if __name__ == '__main__':
+    main()
+    exit(0)
