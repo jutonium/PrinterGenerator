@@ -187,22 +187,27 @@ def translate_row(printer_row):
     for key, value in printer_row.items():
         new_row[key.lower()] = value
 
-    printer_variables = pgen.get_printer_variables()
+    printer_variables = pgen.get_printer_parameters()
     for key in translation:
         printer_variables[key] = new_row.get(translation[key], printer_variables[key])
     return printer_variables
-
 
 def csv_run(args, target_dir, file_ext):
     '''
     Use a csv file as data provider for printer packages.
     '''
-
-    with open(args.csv, mode='r') as infile:
+    # read utf-8 files with or without BOM.
+    with open(args.csv, mode='r', encoding='utf-8-sig' ) as infile:
         file_sample = infile.read(128)
+        file_sample = file_sample.split('\n')[0]
+        print(file_sample)
         infile.seek(0) # back to the beginning
         num_comma = file_sample.count(',')
         num_semicolon = file_sample.count(';')
+        if num_comma < 9 and num_semicolon < 9:
+            print(os.path.basename(sys.argv[0]) + ': error: invalid csv file', file=sys.stderr)
+            sys.exit(1)
+
         if num_comma > num_semicolon:
             reader = csv.DictReader(infile, delimiter=',')
         else:
@@ -219,7 +224,7 @@ def csv_run(args, target_dir, file_ext):
             if 'Catalogs' not in row.keys():
                 printer_variables['catalogs'] = [pref('default_catalog', default='testing')]
 
-            new_printer = pgen.generate_printer(printer_variables)
+            new_printer = pgen.generate_pkginfo(printer_variables)
 
             subdir = printer_variables.get('subdirectory', '')
             file_path = os.path.join(target_dir, subdir)
@@ -231,7 +236,7 @@ def single_run(args, target_dir, file_ext):
     '''
     Use the given parameters to creare a single printer packages.
     '''
-    printer_variables = pgen.get_printer_variables()
+    printer_variables = pgen.get_printer_parameters()
     printer_variables['printername'] = args.printername if args.printername else \
         printer_variables['printername']
     printer_variables['description'] = args.desc if args.desc else printer_variables['description']
@@ -252,7 +257,7 @@ def single_run(args, target_dir, file_ext):
     printer_variables['catalogs'] = [args.catalogs] if args.catalogs else \
         pref('default_catalog', default='testing')
 
-    new_printer = pgen.generate_printer(printer_variables)
+    new_printer = pgen.generate_pkginfo(printer_variables)
 
     subdir = printer_variables.get('subdirectory', '')
     file_path = os.path.join(target_dir, subdir)

@@ -153,7 +153,7 @@ def _get_options_str(options):
             # string -> list
             options = options.split(' ')
         elif len(options) == 1 and isinstance(options[0], str):
-            # list of single string -> list 
+            # list of single string -> list
             options = options[0].split(' ')
         options_lst = list(set(options))
         for option in options_lst:
@@ -162,9 +162,29 @@ def _get_options_str(options):
         options_str = options_str[:-2]
     return options_str
 
-def get_printer_variables():
+def get_printer_parameters():
     '''
-    Create and return a template dict with all printer_variables.
+    Create and return a template dict with all parameters.
+    '''
+    return {
+        'printername':  '',
+        'location':     '',
+        'display_name': '',
+        'address':      '',
+        'driver':       '',
+        'description':  '',
+        'options':      [],
+        'version':      '',
+        'requires':     '',
+        'icon_name':    '',
+        'catalogs':      [],
+        'subdirectory': '',
+        'munkiname':    ''
+    }
+
+def get_printer_defaults():
+    '''
+    Create and return a template dict with default for some parameters.
     '''
     return {
         'printername':  '',
@@ -182,114 +202,120 @@ def get_printer_variables():
         'munkiname':    ''
     }
 
-def generate_printer(printer_variables):
+def check_printer_vars(parameters):
+    '''
+    Checks all printervariables and replaces some with defaults if not present.
+    '''
+    defaults = get_printer_defaults()
+
+    # enforce existence of important parameters
+    if (not parameters['printername'] or
+            re.search(r"[\s#/]", parameters['printername'])):
+        # printernames can't contain spaces, tabs, # or /.  See lpadmin manpage for details.
+        print("ERROR: Printername must be specified and must not contain spaces, tabs, # or /.",
+              file=sys.stderr)
+        print("Skipping printer " + parameters['printername'] + ".", file=sys.stderr)
+        return None
+    if not parameters['driver']:
+        print("ERROR: Driver must be specified.", file=sys.stderr)
+        print("Skipping printer " + parameters['printername'] + ".", file=sys.stderr)
+        return None
+    if not parameters['address']:
+        print("ERROR: Address must be specified.", file=sys.stderr)
+        print("Skipping printer " + parameters['printername'] + ".", file=sys.stderr)
+        return None
+
+    parameters['description'] = parameters['description'] if parameters['description'] \
+        else defaults['description']
+
+    parameters['display_name'] = parameters['display_name'] if parameters['display_name'] \
+        else parameters['printername']
+
+    parameters['munkiname'] = parameters['munkiname'] if parameters['munkiname'] \
+        else parameters['printername']
+
+    parameters['version'] = parameters['version'] if parameters['version'] \
+        else defaults['version']
+
+    parameters['icon_name'] = parameters['icon_name'] if parameters['icon_name'] \
+        else defaults['icon_name']
+
+    if isinstance(parameters['catalogs'], str):
+        parameters['catalogs'] = [parameters['catalogs']]
+
+    parameters['catalogs'] = parameters['catalogs'] if parameters['catalogs'] \
+        else defaults['catalogs']
+
+    parameters['location'] = parameters['location'] if parameters['location'] \
+        else parameters['printername']
+
+    # convenience functions
+    if '://' not in parameters['address']:
+        # Assume the user did not pass in a full address and protocol and
+        # wants to use the default, lpd://
+        parameters['address'] = 'lpd://' + parameters['address']
+
+    if not parameters['driver'].startswith('/Library'):
+        # Assume the user passed in only a relative filename
+        parameters['driver'] = os.path.join('/Library/Printers/PPDs/Contents/Resources',
+                                            parameters['driver'])
+
+
+    return parameters
+
+def generate_pkginfo(parameters):
     '''
     Create a dictionary representing a munki-nopkg-style printer setup.
     Returns the newly created dict.
     '''
-    if (not printer_variables['printername'] or
-            re.search(r"[\s#/]", printer_variables['printername'])):
-        # printernames can't contain spaces, tabs, # or /.  See lpadmin manpage for details.
-        print("ERROR: Printername must be specified and must not contain spaces, tabs, # or /.",
-              file=sys.stderr)
-        print("Skipping printer " + printer_variables['printername'] + ".", file=sys.stderr)
-        return None
-    if not printer_variables['driver']:
-        print("ERROR: Driver must be specified.", file=sys.stderr)
-        print("Skipping printer " + printer_variables['printername'] + ".", file=sys.stderr)
-        return None
-    if not printer_variables['address']:
-        print("ERROR: Address must be specified.", file=sys.stderr)
-        print("Skipping printer " + printer_variables['printername'] + ".", file=sys.stderr)
-        return None
+    parameters = check_printer_vars(parameters)
 
-    printer_plist = copy.deepcopy(TEMPLATE)
+    pkginfo = copy.deepcopy(TEMPLATE)
     # Options in the form of "Option=Value Option2=Value Option3=Value"
     # Requires in the form of "package1 package2" Note: the space seperator
-    options_str = _get_options_str(printer_variables['options'])
+    options_str = _get_options_str(parameters['options'])
 
    # root pkginfo variable replacement
-    if printer_variables['description']:
-        printer_plist['description'] = printer_variables['description']
-    else:
-        printer_plist['description'] = ''
-
-    if printer_variables['display_name']:
-        printer_plist['display_name'] = printer_variables['display_name']
-    else:
-        printer_plist['display_name'] = printer_variables['printername']
-
-    if printer_variables['munkiname']:
-        printer_plist['name'] = printer_variables['munkiname']
-    else:
-        printer_plist['name'] = printer_plist['display_name']
-
-    if printer_variables['version']:
-        printer_plist['version'] = printer_variables['version']
-    else:
-        printer_plist['version'] = '1.0'
-
-    if printer_variables['icon_name']:
-        printer_plist['icon_name'] = printer_variables['icon_name']
-    else:
-        printer_plist['icon_name'] = ''
-
-    if isinstance(printer_variables['catalogs'], str):
-        printer_variables['catalogs'] = [printer_variables['catalogs']]
-
-    if printer_variables['catalogs']:
-        printer_plist['catalogs'] = printer_variables['catalogs']
-    else:
-        printer_plist['catalogs'] = ['testing']
-    
-
-    # convenience functions
-    if '://' not in printer_variables['address']:
-        # Assume the user did not pass in a full address and protocol and
-        # wants to use the default, lpd://
-        printer_variables['address'] = 'lpd://' + printer_variables['address']
-
-    if not printer_variables['driver'].startswith('/Library'):
-        # Assume the user passed in only a relative filename
-        printer_variables['driver'] = os.path.join('/Library/Printers/PPDs/Contents/Resources',
-                                                   printer_variables['driver'])
-
-    if not printer_variables['location']:
-        printer_variables['location'] = printer_variables['printername']
+    pkginfo['description'] = parameters['description']
+    pkginfo['display_name'] = parameters['display_name']
+    pkginfo['name'] = parameters['munkiname']
+    pkginfo['version'] = parameters['version']
+    pkginfo['icon_name'] = parameters['icon_name']
+    pkginfo['catalogs'] = parameters['catalogs']
 
     # installcheck_script variable replacement
-    printer_plist['installcheck_script'] = printer_plist['installcheck_script'].\
-        replace("PRINTERNAME", printer_variables['printername'])
-    printer_plist['installcheck_script'] = printer_plist['installcheck_script'].\
-        replace("ADDRESS", printer_variables['address'])
-    printer_plist['installcheck_script'] = printer_plist['installcheck_script'].\
-        replace("DISPLAY_NAME", printer_variables['display_name'])
-    printer_plist['installcheck_script'] = printer_plist['installcheck_script'].\
-        replace("LOCATION", printer_variables['location'].replace('"', ''))
-    printer_plist['installcheck_script'] = printer_plist['installcheck_script'].\
+    pkginfo['installcheck_script'] = pkginfo['installcheck_script'].\
+        replace("PRINTERNAME", parameters['printername'])
+    pkginfo['installcheck_script'] = pkginfo['installcheck_script'].\
+        replace("ADDRESS", parameters['address'])
+    pkginfo['installcheck_script'] = pkginfo['installcheck_script'].\
+        replace("DISPLAY_NAME", parameters['display_name'])
+    pkginfo['installcheck_script'] = pkginfo['installcheck_script'].\
+        replace("LOCATION", parameters['location'].replace('"', ''))
+    pkginfo['installcheck_script'] = pkginfo['installcheck_script'].\
         replace("OPTIONS", options_str)
     # postinstall_script variable replacement
-    printer_plist['postinstall_script'] = printer_plist['postinstall_script'].\
-        replace("PRINTERNAME", printer_variables['printername'])
-    printer_plist['postinstall_script'] = printer_plist['postinstall_script'].\
-        replace("ADDRESS", printer_variables['address'])
-    printer_plist['postinstall_script'] = printer_plist['postinstall_script'].\
-        replace("DISPLAY_NAME", printer_variables['display_name'])
-    printer_plist['postinstall_script'] = printer_plist['postinstall_script'].\
-        replace("LOCATION", printer_variables['location'].replace('"', ''))
-    printer_plist['postinstall_script'] = printer_plist['postinstall_script'].\
-        replace("DRIVER", printer_variables['driver'].replace('"', ''))
-    printer_plist['postinstall_script'] = printer_plist['postinstall_script'].\
+    pkginfo['postinstall_script'] = pkginfo['postinstall_script'].\
+        replace("PRINTERNAME", parameters['printername'])
+    pkginfo['postinstall_script'] = pkginfo['postinstall_script'].\
+        replace("ADDRESS", parameters['address'])
+    pkginfo['postinstall_script'] = pkginfo['postinstall_script'].\
+        replace("DISPLAY_NAME", parameters['display_name'])
+    pkginfo['postinstall_script'] = pkginfo['postinstall_script'].\
+        replace("LOCATION", parameters['location'].replace('"', ''))
+    pkginfo['postinstall_script'] = pkginfo['postinstall_script'].\
+        replace("DRIVER", parameters['driver'].replace('"', ''))
+    pkginfo['postinstall_script'] = pkginfo['postinstall_script'].\
         replace("OPTIONS", options_str)
     # uninstall_script variable replacement
-    printer_plist['uninstall_script'] = printer_plist['uninstall_script'].\
-        replace("PRINTERNAME", printer_variables['printername'])
+    pkginfo['uninstall_script'] = pkginfo['uninstall_script'].\
+        replace("PRINTERNAME", parameters['printername'])
     # required packages
-    if printer_variables['requires']:
-        printer_plist['requires'] = \
-            [r.replace('\\', '') for r in re.split(r"(?<!\\)\s", printer_variables['requires'])]
+    if parameters['requires']:
+        pkginfo['requires'] = \
+            [r.replace('\\', '') for r in re.split(r"(?<!\\)\s", parameters['requires'])]
 
-    return printer_plist
+    return pkginfo
 
 if __name__ == '__main__':
     print('Please import this module with import pgen_mod.')
